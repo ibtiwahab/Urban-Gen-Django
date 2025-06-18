@@ -1,0 +1,16 @@
+Django>=4.2.0
+djangorestframework>=3.14.0
+django-cors-headers>=4.0.0
+
+# For geometry processing (you may need additional libraries)
+# numpy>=1.24.0
+# scipy>=1.10.0
+# matplotlib>=3.7.0
+# shapely>=2.0.0
+
+# For development
+django-debug-toolbar>=4.1.0
+
+# For production
+gunicorn>=21.2.0
+whitenoise>=6.5.0
