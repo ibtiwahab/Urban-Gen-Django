@@ -1,4 +1,4 @@
-# planning_api/views.py - Fixed version with proper building placement
+# planning_api/views.py - Enhanced with geometry integration
 import logging
 import math
 import random
@@ -6,12 +6,16 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from .serializers import GeneratePlanRequestSerializer, GeneratePlanResponseSerializer
+from .geometry import (
+    Point3D, Polyline, CurveOperations, ParametricDesign, 
+    BuildingPlacement, OffsetOperations, SurfaceOperations
+)
 
 logger = logging.getLogger(__name__)
 
 
 class SiteParameters:
-    """Simplified site parameters class"""
+    """Enhanced site parameters class with geometry integration"""
     def __init__(self):
         self.site_type = 0
         self.density = 0.5
@@ -21,286 +25,142 @@ class SiteParameters:
         self.radiant = 0.0
         self.site_area = 0.0
         self.site_curve = None
-        self.site_bounds = None  # Add bounds for proper placement
+        self.site_polyline = None  # Add Polyline object
+        self.site_bounds = None
     
-    def set_site_from_polyline(self, polyline):
-        """Set site parameters from polyline data"""
-        self.site_curve = polyline
-        if len(polyline) >= 3:
-            self.site_area = self._calculate_area(polyline)
-            self.radiant = self._calculate_orientation(polyline)
-            self.site_bounds = self._calculate_bounds(polyline)
-    
-    def _calculate_area(self, polyline):
-        """Calculate polygon area using shoelace formula"""
-        if len(polyline) < 3:
-            return 1000.0  # Default area
+    def set_site_from_polyline(self, flattened_vertices):
+        """Set site parameters from flattened vertices using geometry classes"""
+        # Convert to Polyline object
+        self.site_polyline = CurveOperations.polyline_from_vertices(flattened_vertices)
         
-        area = 0.0
-        n = len(polyline)
-        for i in range(n):
-            j = (i + 1) % n
-            area += polyline[i]['x'] * polyline[j]['y']
-            area -= polyline[j]['x'] * polyline[i]['y']
-        return abs(area) / 2.0
-    
-    def _calculate_orientation(self, polyline):
-        """Calculate main orientation of the polygon"""
-        if len(polyline) < 2:
-            return 0.0
-        
-        # Find the longest edge
-        max_length = 0.0
-        main_angle = 0.0
-        
-        for i in range(len(polyline)):
-            j = (i + 1) % len(polyline)
-            dx = polyline[j]['x'] - polyline[i]['x']
-            dy = polyline[j]['y'] - polyline[i]['y']
-            length = math.sqrt(dx*dx + dy*dy)
+        if self.site_polyline and len(self.site_polyline.points) >= 3:
+            # Make closed if needed
+            self.site_polyline.make_closed()
             
-            if length > max_length:
-                max_length = length
-                main_angle = math.atan2(dy, dx)
-        
-        return main_angle
-    
-    def _calculate_bounds(self, polyline):
-        """Calculate bounding box of the polygon"""
-        if not polyline:
-            return {'min_x': 0, 'max_x': 100, 'min_y': 0, 'max_y': 100}
-        
-        min_x = min(point['x'] for point in polyline)
-        max_x = max(point['x'] for point in polyline)
-        min_y = min(point['y'] for point in polyline)
-        max_y = max(point['y'] for point in polyline)
-        
-        return {
-            'min_x': min_x,
-            'max_x': max_x,
-            'min_y': min_y,
-            'max_y': max_y
-        }
+            # Calculate area using geometry class
+            self.site_area = self.site_polyline.get_area()
+            
+            # Calculate orientation
+            self.radiant = CurveOperations.calculate_main_orientation(self.site_polyline)
+            
+            # Calculate bounds
+            min_point, max_point = self.site_polyline.get_bounding_box()
+            self.site_bounds = {
+                'min_x': min_point.x,
+                'max_x': max_point.x,
+                'min_y': min_point.y,
+                'max_y': max_point.y
+            }
+            
+            # Keep legacy format for compatibility
+            self.site_curve = [{'x': p.x, 'y': p.y, 'z': p.z} for p in self.site_polyline.points]
 
 
-class GeometryProcessor:
-    """Simplified geometry processor"""
+class EnhancedGeometryProcessor:
+    """Enhanced geometry processor using the geometry package"""
     
     @staticmethod
-    def create_polyline_from_vertices(flattened_vertices):
-        """Convert flattened vertices to polyline structure"""
-        points = []
-        for i in range(0, len(flattened_vertices), 3):
-            points.append({
-                'x': flattened_vertices[i],
-                'y': flattened_vertices[i + 1],
-                'z': flattened_vertices[i + 2]
-            })
-        return points
-    
-    @staticmethod
-    def compute_parameters(polyline):
-        """Create site parameters from polyline"""
+    def compute_parameters(flattened_vertices):
+        """Create site parameters from flattened vertices"""
         site_params = SiteParameters()
-        site_params.set_site_from_polyline(polyline)
+        site_params.set_site_from_polyline(flattened_vertices)
         return [site_params]
     
     @staticmethod
-    def point_in_polygon(point, polygon):
-        """Check if a point is inside a polygon using ray casting algorithm"""
-        x, y = point['x'], point['y']
-        n = len(polygon)
-        inside = False
-        
-        p1x, p1y = polygon[0]['x'], polygon[0]['y']
-        for i in range(1, n + 1):
-            p2x, p2y = polygon[i % n]['x'], polygon[i % n]['y']
-            if y > min(p1y, p2y):
-                if y <= max(p1y, p2y):
-                    if x <= max(p1x, p2x):
-                        if p1y != p2y:
-                            xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
-                        if p1x == p2x or x <= xinters:
-                            inside = not inside
-            p1x, p1y = p2x, p2y
-        
-        return inside
-    
-    @staticmethod
-    def generate_building_positions_in_polygon(polygon, num_buildings, building_width, building_depth, min_spacing=5):
-        """Generate valid building positions within the polygon boundary"""
-        if not polygon or len(polygon) < 3:
-            return []
-        
-        bounds = {
-            'min_x': min(point['x'] for point in polygon),
-            'max_x': max(point['x'] for point in polygon),
-            'min_y': min(point['y'] for point in polygon),
-            'max_y': max(point['y'] for point in polygon)
-        }
-        
-        positions = []
-        attempts = 0
-        max_attempts = num_buildings * 50  # Prevent infinite loops
-        
-        while len(positions) < num_buildings and attempts < max_attempts:
-            attempts += 1
-            
-            # Generate random position within bounds
-            x = random.uniform(bounds['min_x'] + building_width/2, bounds['max_x'] - building_width/2)
-            y = random.uniform(bounds['min_y'] + building_depth/2, bounds['max_y'] - building_depth/2)
-            
-            # Check if all corners of the building are inside the polygon
-            building_corners = [
-                {'x': x - building_width/2, 'y': y - building_depth/2},
-                {'x': x + building_width/2, 'y': y - building_depth/2},
-                {'x': x + building_width/2, 'y': y + building_depth/2},
-                {'x': x - building_width/2, 'y': y + building_depth/2}
-            ]
-            
-            all_corners_inside = all(GeometryProcessor.point_in_polygon(corner, polygon) for corner in building_corners)
-            
-            if not all_corners_inside:
-                continue
-            
-            # Check minimum distance from other buildings
-            too_close = False
-            for existing_pos in positions:
-                distance = math.sqrt((x - existing_pos['x'])**2 + (y - existing_pos['y'])**2)
-                if distance < (building_width + min_spacing):
-                    too_close = True
-                    break
-            
-            if not too_close:
-                positions.append({'x': x, 'y': y})
-        
-        return positions
-    
-    @staticmethod
-    def create_inset_polygon(polygon, inset_distance):
-        """Create an inset polygon (simplified approach)"""
-        if not polygon or len(polygon) < 3:
-            return polygon
-        
-        # Calculate centroid
-        centroid_x = sum(point['x'] for point in polygon) / len(polygon)
-        centroid_y = sum(point['y'] for point in polygon) / len(polygon)
-        
-        # Move each point towards the centroid
-        inset_polygon = []
-        for point in polygon:
-            # Vector from centroid to point
-            dx = point['x'] - centroid_x
-            dy = point['y'] - centroid_y
-            length = math.sqrt(dx*dx + dy*dy)
-            
-            if length > inset_distance:
-                # Normalize and scale
-                dx = dx / length * (length - inset_distance)
-                dy = dy / length * (length - inset_distance)
-                
-                inset_polygon.append({
-                    'x': centroid_x + dx,
-                    'y': centroid_y + dy,
-                    'z': point.get('z', 0) + 0.2  # Slight Z offset
-                })
-        
-        return inset_polygon if len(inset_polygon) >= 3 else polygon
-    
-    @staticmethod
     def compute_design(site_parameters_list):
-        """Generate urban design based on parameters"""
+        """Generate urban design using advanced geometry operations"""
         if not site_parameters_list:
-            return GeometryProcessor._get_default_response()
+            return EnhancedGeometryProcessor._get_default_response()
         
         site_params = site_parameters_list[0]
         
-        if not site_params.site_curve or len(site_params.site_curve) < 3:
-            return GeometryProcessor._get_default_response()
+        if not site_params.site_polyline or len(site_params.site_polyline.points) < 3:
+            return EnhancedGeometryProcessor._get_default_response()
         
-        # Calculate number of buildings based on area and density
-        base_building_area = 300  # Base area per building
-        adjusted_area = base_building_area / max(0.1, site_params.density)
-        num_buildings = max(1, int(site_params.site_area / adjusted_area))
-        num_buildings = min(num_buildings, 8)  # Reasonable limit
-        
-        response = {
-            'buildingLayersHeights': [],
-            'buildingLayersVertices': [],
-            'subSiteVertices': [],
-            'subSiteSetbackVertices': []
-        }
-        
-        # Building parameters
-        building_width = 15.0 + (site_params.density * 10.0)  # Density affects size
-        building_depth = 12.0 + (site_params.density * 8.0)
-        floor_height = 3.0
-        num_floors = max(2, int(site_params.site_far * 4))  # FAR affects height
-        
-        # Generate building positions within the polygon
-        building_positions = GeometryProcessor.generate_building_positions_in_polygon(
-            site_params.site_curve, num_buildings, building_width, building_depth
-        )
-        
-        logger.info(f"Generated {len(building_positions)} building positions for {num_buildings} requested buildings")
-        
-        # Create buildings at valid positions
-        for pos in building_positions:
-            # Building heights for each floor
-            heights = [floor_height] * num_floors
-            response['buildingLayersHeights'].append(heights)
+        try:
+            # Use parametric design to generate layout
+            design_result = ParametricDesign.apply_site_parameters(
+                site_params.site_polyline.points,
+                site_params.site_area,
+                site_params.density,
+                site_params.site_far,
+                site_params.mix_ratio,
+                site_params.building_style,
+                site_params.radiant
+            )
             
-            # Building vertices for each floor
-            building_vertices = []
-            for floor in range(num_floors):
-                z = floor * floor_height
-                floor_vertices = [
-                    pos['x'] - building_width/2, pos['y'] - building_depth/2, z,  # Bottom-left
-                    pos['x'] + building_width/2, pos['y'] - building_depth/2, z,  # Bottom-right  
-                    pos['x'] + building_width/2, pos['y'] + building_depth/2, z,  # Top-right
-                    pos['x'] - building_width/2, pos['y'] + building_depth/2, z   # Top-left
-                ]
-                building_vertices.append(floor_vertices)
+            response = {
+                'buildingLayersHeights': [],
+                'buildingLayersVertices': [],
+                'subSiteVertices': [],
+                'subSiteSetbackVertices': []
+            }
             
-            response['buildingLayersVertices'].append(building_vertices)
-        
-        # Generate sub-site (use original polyline)
-        site_vertices = []
-        for point in site_params.site_curve:
-            site_vertices.extend([point['x'], point['y'], point.get('z', 0)])
-        response['subSiteVertices'].append(site_vertices)
-        
-        # Generate setback (inset polygon)
-        setback_distance = 3.0 + (site_params.density * 2.0)  # Density affects setback
-        inset_polygon = GeometryProcessor.create_inset_polygon(site_params.site_curve, setback_distance)
-        
-        setback_vertices = []
-        for point in inset_polygon:
-            setback_vertices.extend([point['x'], point['y'], point.get('z', 0.2)])
-        
-        if setback_vertices:
-            response['subSiteSetbackVertices'].append(setback_vertices)
-        
-        return response
+            # Generate buildings from parametric design
+            building_positions = design_result['building_positions']
+            building_width = design_result['building_width']
+            building_depth = design_result['building_depth']
+            floors_per_building = design_result['floors_per_building']
+            floor_height = design_result['floor_height']
+            
+            logger.info(f"Parametric design generated {len(building_positions)} buildings")
+            
+            # Create buildings using surface operations
+            for pos in building_positions:
+                # Create building vertices using surface operations
+                building_vertices = SurfaceOperations.create_building_vertices_array(
+                    pos, building_width, building_depth, floors_per_building, floor_height
+                )
+                
+                # Building heights for each floor
+                heights = [floor_height] * floors_per_building
+                response['buildingLayersHeights'].append(heights)
+                response['buildingLayersVertices'].append(building_vertices)
+            
+            # Generate sub-site (original polygon)
+            site_vertices = []
+            for point in site_params.site_polyline.points:
+                site_vertices.extend([point.x, point.y, point.z])
+            response['subSiteVertices'].append(site_vertices)
+            
+            # Generate setback using offset operations
+            setback_distance = 3.0 + (site_params.density * 2.0)
+            
+            # Use geometry operations for proper offset
+            offset_polyline = OffsetOperations.offset_polygon(
+                site_params.site_polyline, setback_distance
+            )
+            
+            if offset_polyline:
+                setback_vertices = []
+                for point in offset_polyline.points:
+                    setback_vertices.extend([point.x, point.y, point.z + 0.2])
+                response['subSiteSetbackVertices'].append(setback_vertices)
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error in parametric design generation: {str(e)}")
+            return EnhancedGeometryProcessor._get_default_response()
     
     @staticmethod
     def _get_default_response():
         """Return a default response structure"""
         return {
             'buildingLayersHeights': [
-                [3.0, 3.0, 3.0],  # Building 1 floor heights
-                [4.0, 3.5, 3.5],  # Building 2 floor heights
+                [3.0, 3.0, 3.0],
+                [4.0, 3.5, 3.5],
             ],
             'buildingLayersVertices': [
-                [  # Building 1 - 3 floors
-                    [0.0, 0.0, 0.0, 20.0, 0.0, 0.0, 20.0, 15.0, 0.0, 0.0, 15.0, 0.0],  # Floor 1
-                    [0.0, 0.0, 3.0, 20.0, 0.0, 3.0, 20.0, 15.0, 3.0, 0.0, 15.0, 3.0],  # Floor 2
-                    [0.0, 0.0, 6.0, 20.0, 0.0, 6.0, 20.0, 15.0, 6.0, 0.0, 15.0, 6.0],  # Floor 3
+                [
+                    [0.0, 0.0, 0.0, 20.0, 0.0, 0.0, 20.0, 15.0, 0.0, 0.0, 15.0, 0.0],
+                    [0.0, 0.0, 3.0, 20.0, 0.0, 3.0, 20.0, 15.0, 3.0, 0.0, 15.0, 3.0],
+                    [0.0, 0.0, 6.0, 20.0, 0.0, 6.0, 20.0, 15.0, 6.0, 0.0, 15.0, 6.0],
                 ],
-                [  # Building 2 - 3 floors  
-                    [30.0, 0.0, 0.0, 50.0, 0.0, 0.0, 50.0, 15.0, 0.0, 30.0, 15.0, 0.0],  # Floor 1
-                    [30.0, 0.0, 4.0, 50.0, 0.0, 4.0, 50.0, 15.0, 4.0, 30.0, 15.0, 4.0],  # Floor 2
-                    [30.0, 0.0, 7.5, 50.0, 0.0, 7.5, 50.0, 15.0, 7.5, 30.0, 15.0, 7.5],  # Floor 3
+                [
+                    [30.0, 0.0, 0.0, 50.0, 0.0, 0.0, 50.0, 15.0, 0.0, 30.0, 15.0, 0.0],
+                    [30.0, 0.0, 4.0, 50.0, 0.0, 4.0, 50.0, 15.0, 4.0, 30.0, 15.0, 4.0],
+                    [30.0, 0.0, 7.5, 50.0, 0.0, 7.5, 50.0, 15.0, 7.5, 30.0, 15.0, 7.5],
                 ]
             ],
             'subSiteVertices': [
@@ -313,7 +173,7 @@ class GeometryProcessor:
 
 
 class GeneratePlanView(APIView):
-    """Generate urban plan endpoint"""
+    """Enhanced generate urban plan endpoint with geometry integration"""
     
     def post(self, request):
         try:
@@ -331,12 +191,8 @@ class GeneratePlanView(APIView):
             
             logger.info(f"Received plan generation request with {len(flattened_vertices)} vertices")
             
-            # Convert vertices to polyline
-            polyline = GeometryProcessor.create_polyline_from_vertices(flattened_vertices)
-            logger.info(f"Converted to polyline with {len(polyline)} points")
-            
-            # Compute site parameters
-            site_parameters_list = GeometryProcessor.compute_parameters(polyline)
+            # Compute site parameters using enhanced geometry processor
+            site_parameters_list = EnhancedGeometryProcessor.compute_parameters(flattened_vertices)
             site_parameters = site_parameters_list[0] if site_parameters_list else SiteParameters()
             
             # Fill plan parameters from request
@@ -344,8 +200,8 @@ class GeneratePlanView(APIView):
             
             logger.info(f"Site parameters: area={site_parameters.site_area:.2f}, FAR={site_parameters.site_far}, density={site_parameters.density}")
             
-            # Compute design
-            design_result = GeometryProcessor.compute_design(site_parameters_list)
+            # Compute design using enhanced processor
+            design_result = EnhancedGeometryProcessor.compute_design(site_parameters_list)
             
             # Serialize response
             response_serializer = GeneratePlanResponseSerializer(data=design_result)
@@ -406,3 +262,77 @@ class GeneratePlanView(APIView):
             orientation = plan_params_data['orientation']
             if 0.0 <= orientation <= 180.0:
                 site_parameters.radiant = math.radians(orientation)
+
+
+class GeometryAnalysisView(APIView):
+    """New endpoint for geometry analysis operations"""
+    
+    def post(self, request):
+        try:
+            # Validate geometry data
+            flattened_vertices = request.data.get('vertices', [])
+            operation = request.data.get('operation', 'analyze')
+            
+            if len(flattened_vertices) < 9:  # At least 3 points
+                return Response(
+                    {'error': 'At least 3 vertices required'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Create polyline
+            polyline = CurveOperations.polyline_from_vertices(flattened_vertices)
+            
+            if operation == 'analyze':
+                # Basic analysis
+                analysis = {
+                    'area': polyline.get_area(),
+                    'perimeter': polyline.length,
+                    'is_closed': polyline.is_closed,
+                    'is_valid': polyline.is_valid,
+                    'centroid': {
+                        'x': polyline.get_centroid().x,
+                        'y': polyline.get_centroid().y,
+                        'z': polyline.get_centroid().z
+                    },
+                    'main_orientation': CurveOperations.calculate_main_orientation(polyline)
+                }
+                return Response(analysis, status=status.HTTP_200_OK)
+            
+            elif operation == 'offset':
+                # Offset polygon
+                offset_distance = request.data.get('offset_distance', 5.0)
+                offset_polyline = OffsetOperations.offset_polygon(polyline, offset_distance)
+                
+                if offset_polyline:
+                    offset_vertices = []
+                    for point in offset_polyline.points:
+                        offset_vertices.extend([point.x, point.y, point.z])
+                    return Response({'offset_vertices': offset_vertices}, status=status.HTTP_200_OK)
+                else:
+                    return Response({'error': 'Offset operation failed'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            elif operation == 'validate':
+                # Polygon validation
+                from .geometry.advanced import IntersectionOperations
+                self_intersects = IntersectionOperations.polyline_self_intersection_check(polyline)
+                
+                validation = {
+                    'is_valid': polyline.is_valid,
+                    'is_closed': polyline.is_closed,
+                    'self_intersects': self_intersects,
+                    'point_count': len(polyline.points)
+                }
+                return Response(validation, status=status.HTTP_200_OK)
+            
+            else:
+                return Response(
+                    {'error': f'Unknown operation: {operation}'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+        except Exception as e:
+            logger.error(f"Error in GeometryAnalysis: {str(e)}", exc_info=True)
+            return Response(
+                {'error': f'Geometry analysis failed: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
