@@ -1,4 +1,4 @@
-# planning_api/views.py - Enhanced with geometry integration
+# planning_api/views.py - Fixed parameter handling and building generation
 import logging
 import math
 import random
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class SiteParameters:
-    """Enhanced site parameters class with geometry integration"""
+    """Enhanced site parameters class with better parameter handling"""
     def __init__(self):
         self.site_type = 0
         self.density = 0.5
@@ -25,25 +25,25 @@ class SiteParameters:
         self.radiant = 0.0
         self.site_area = 0.0
         self.site_curve = None
-        self.site_polyline = None  # Add Polyline object
+        self.site_polyline = None
         self.site_bounds = None
+        
+        # Enhanced parameters
+        self.min_building_spacing = 5.0
+        self.setback_distance = 3.0
+        self.use_grid_layout = False
+        self.adaptive_orientation = True
+        self.max_buildings = 50  # Increased from 8
     
     def set_site_from_polyline(self, flattened_vertices):
         """Set site parameters from flattened vertices using geometry classes"""
-        # Convert to Polyline object
         self.site_polyline = CurveOperations.polyline_from_vertices(flattened_vertices)
         
         if self.site_polyline and len(self.site_polyline.points) >= 3:
-            # Make closed if needed
             self.site_polyline.make_closed()
-            
-            # Calculate area using geometry class
             self.site_area = self.site_polyline.get_area()
-            
-            # Calculate orientation
             self.radiant = CurveOperations.calculate_main_orientation(self.site_polyline)
             
-            # Calculate bounds
             min_point, max_point = self.site_polyline.get_bounding_box()
             self.site_bounds = {
                 'min_x': min_point.x,
@@ -52,12 +52,65 @@ class SiteParameters:
                 'max_y': max_point.y
             }
             
-            # Keep legacy format for compatibility
             self.site_curve = [{'x': p.x, 'y': p.y, 'z': p.z} for p in self.site_polyline.points]
+
+    def update_dependent_parameters(self):
+        """Update dependent parameters based on site type and other settings"""
+        # Update building spacing based on density
+        base_spacing = 5.0
+        if self.density > 0.7:
+            self.min_building_spacing = max(3.0, base_spacing * 0.8)
+        elif self.density < 0.3:
+            self.min_building_spacing = base_spacing * 1.5
+        else:
+            self.min_building_spacing = base_spacing
+
+        # Update setback based on FAR and site type
+        base_setback = 3.0
+        if self.site_far > 2.0:
+            self.setback_distance = max(base_setback, 4.0)
+        else:
+            self.setback_distance = base_setback
+
+        # Adjust max buildings based on site area and density
+        if self.site_area > 0:
+            # Calculate theoretical maximum based on site area
+            building_footprint = self.get_building_dimensions()[0] * self.get_building_dimensions()[1]
+            spacing_area = self.min_building_spacing * self.min_building_spacing
+            total_building_space = building_footprint + spacing_area
+            
+            theoretical_max = int(self.site_area / total_building_space)
+            self.max_buildings = min(theoretical_max, 100)  # Cap at 100 for performance
+        
+        logger.info(f"Updated parameters: spacing={self.min_building_spacing}, setback={self.setback_distance}, max_buildings={self.max_buildings}")
+
+    def get_building_dimensions(self):
+        """Get building dimensions based on site type and density"""
+        base_width = 15.0
+        base_depth = 12.0
+        
+        # Adjust based on site type
+        type_multipliers = {
+            0: (1.0, 1.0),    # Residential
+            1: (1.3, 1.2),    # Commercial
+            2: (1.2, 1.1),    # Office
+            3: (1.1, 1.0),    # Mixed Use
+            4: (1.5, 1.4)     # Industrial
+        }
+        
+        width_mult, depth_mult = type_multipliers.get(self.site_type, (1.0, 1.0))
+        
+        # Adjust based on density
+        density_factor = 0.7 + (self.density * 0.6)  # 0.7 to 1.3
+        
+        width = base_width * width_mult * density_factor
+        depth = base_depth * depth_mult * density_factor
+        
+        return width, depth
 
 
 class EnhancedGeometryProcessor:
-    """Enhanced geometry processor using the geometry package"""
+    """Enhanced geometry processor with better building generation"""
     
     @staticmethod
     def compute_parameters(flattened_vertices):
@@ -68,7 +121,7 @@ class EnhancedGeometryProcessor:
     
     @staticmethod
     def compute_design(site_parameters_list):
-        """Generate urban design using advanced geometry operations"""
+        """Generate urban design with improved building placement"""
         if not site_parameters_list:
             return EnhancedGeometryProcessor._get_default_response()
         
@@ -78,6 +131,9 @@ class EnhancedGeometryProcessor:
             return EnhancedGeometryProcessor._get_default_response()
         
         try:
+            # Update dependent parameters
+            site_params.update_dependent_parameters()
+            
             # Use parametric design to generate layout
             design_result = ParametricDesign.apply_site_parameters(
                 site_params.site_polyline.points,
@@ -86,7 +142,8 @@ class EnhancedGeometryProcessor:
                 site_params.site_far,
                 site_params.mix_ratio,
                 site_params.building_style,
-                site_params.radiant
+                site_params.radiant,
+                site_params.max_buildings  # Pass max buildings limit
             )
             
             response = {
@@ -103,16 +160,14 @@ class EnhancedGeometryProcessor:
             floors_per_building = design_result['floors_per_building']
             floor_height = design_result['floor_height']
             
-            logger.info(f"Parametric design generated {len(building_positions)} buildings")
+            logger.info(f"Generated {len(building_positions)} buildings with width={building_width:.1f}, depth={building_depth:.1f}")
             
             # Create buildings using surface operations
             for pos in building_positions:
-                # Create building vertices using surface operations
                 building_vertices = SurfaceOperations.create_building_vertices_array(
                     pos, building_width, building_depth, floors_per_building, floor_height
                 )
                 
-                # Building heights for each floor
                 heights = [floor_height] * floors_per_building
                 response['buildingLayersHeights'].append(heights)
                 response['buildingLayersVertices'].append(building_vertices)
@@ -124,11 +179,8 @@ class EnhancedGeometryProcessor:
             response['subSiteVertices'].append(site_vertices)
             
             # Generate setback using offset operations
-            setback_distance = 3.0 + (site_params.density * 2.0)
-            
-            # Use geometry operations for proper offset
             offset_polyline = OffsetOperations.offset_polygon(
-                site_params.site_polyline, setback_distance
+                site_params.site_polyline, site_params.setback_distance
             )
             
             if offset_polyline:
@@ -173,13 +225,14 @@ class EnhancedGeometryProcessor:
 
 
 class GeneratePlanView(APIView):
-    """Enhanced generate urban plan endpoint with geometry integration"""
+    """Enhanced generate urban plan endpoint with better parameter handling"""
     
     def post(self, request):
         try:
             # Validate input data
             serializer = GeneratePlanRequestSerializer(data=request.data)
             if not serializer.is_valid():
+                logger.error(f"Validation failed: {serializer.errors}")
                 return Response(
                     {'error': 'Invalid input data', 'details': serializer.errors}, 
                     status=status.HTTP_400_BAD_REQUEST
@@ -190,15 +243,16 @@ class GeneratePlanView(APIView):
             plan_parameters_data = validated_data.get('plan_parameters', {})
             
             logger.info(f"Received plan generation request with {len(flattened_vertices)} vertices")
+            logger.info(f"Plan parameters: {plan_parameters_data}")
             
             # Compute site parameters using enhanced geometry processor
             site_parameters_list = EnhancedGeometryProcessor.compute_parameters(flattened_vertices)
             site_parameters = site_parameters_list[0] if site_parameters_list else SiteParameters()
             
-            # Fill plan parameters from request
+            # Fill plan parameters from request - FIXED PARAMETER HANDLING
             self._fill_plan_parameters(plan_parameters_data, site_parameters)
             
-            logger.info(f"Site parameters: area={site_parameters.site_area:.2f}, FAR={site_parameters.site_far}, density={site_parameters.density}")
+            logger.info(f"Final parameters: area={site_parameters.site_area:.2f}, FAR={site_parameters.site_far}, density={site_parameters.density}, site_type={site_parameters.site_type}, building_style={site_parameters.building_style}")
             
             # Compute design using enhanced processor
             design_result = EnhancedGeometryProcessor.compute_design(site_parameters_list)
@@ -223,67 +277,85 @@ class GeneratePlanView(APIView):
             )
     
     def _fill_plan_parameters(self, plan_params_data, site_parameters):
-        """Fill site parameters from request data"""
+        """Fill site parameters from request data - FIXED VERSION"""
         if not plan_params_data:
+            logger.warning("No plan parameters provided, using defaults")
             return
         
-        # Site type
+        logger.info(f"Processing plan parameters: {plan_params_data}")
+        
+        # Site type - FIXED
         if 'site_type' in plan_params_data:
-            site_type = plan_params_data['site_type']
+            site_type = int(plan_params_data['site_type'])
             if 0 <= site_type <= 4:
                 site_parameters.site_type = site_type
+                logger.info(f"Set site_type to {site_type}")
+            else:
+                logger.warning(f"Invalid site_type: {site_type}")
         
-        # FAR (Floor Area Ratio)
+        # FAR (Floor Area Ratio) - FIXED
         if 'far' in plan_params_data:
-            far = plan_params_data['far']
+            far = float(plan_params_data['far'])
             if 0.0 <= far <= 10.0:
                 site_parameters.site_far = far
+                logger.info(f"Set FAR to {far}")
+            else:
+                logger.warning(f"Invalid FAR: {far}")
         
-        # Density
+        # Density - FIXED
         if 'density' in plan_params_data:
-            density = plan_params_data['density']
-            if 0.0 <= density <= 1.0:
+            density = float(plan_params_data['density'])
+            if 0.0 <= density <= 0.99:  # Changed from 1.0 to 0.99 to match frontend
                 site_parameters.density = density
+                logger.info(f"Set density to {density}")
+            else:
+                logger.warning(f"Invalid density: {density}")
         
-        # Mix ratio
+        # Mix ratio - FIXED
         if 'mix_ratio' in plan_params_data:
-            mix_ratio = plan_params_data['mix_ratio']
-            if 0.0 <= mix_ratio <= 1.0:
+            mix_ratio = float(plan_params_data['mix_ratio'])
+            if 0.0 <= mix_ratio <= 0.99:  # Changed from 1.0 to 0.99 to match frontend
                 site_parameters.mix_ratio = mix_ratio
+                logger.info(f"Set mix_ratio to {mix_ratio}")
+            else:
+                logger.warning(f"Invalid mix_ratio: {mix_ratio}")
         
-        # Building style
+        # Building style - FIXED
         if 'building_style' in plan_params_data:
-            building_style = plan_params_data['building_style']
+            building_style = int(plan_params_data['building_style'])
             if 0 <= building_style <= 3:
                 site_parameters.building_style = building_style
+                logger.info(f"Set building_style to {building_style}")
+            else:
+                logger.warning(f"Invalid building_style: {building_style}")
         
-        # Orientation
+        # Orientation - FIXED
         if 'orientation' in plan_params_data:
-            orientation = plan_params_data['orientation']
+            orientation = float(plan_params_data['orientation'])
             if 0.0 <= orientation <= 180.0:
                 site_parameters.radiant = math.radians(orientation)
+                logger.info(f"Set orientation to {orientation} degrees ({site_parameters.radiant} radians)")
+            else:
+                logger.warning(f"Invalid orientation: {orientation}")
 
 
 class GeometryAnalysisView(APIView):
-    """New endpoint for geometry analysis operations"""
+    """Enhanced geometry analysis endpoint"""
     
     def post(self, request):
         try:
-            # Validate geometry data
             flattened_vertices = request.data.get('vertices', [])
             operation = request.data.get('operation', 'analyze')
             
-            if len(flattened_vertices) < 9:  # At least 3 points
+            if len(flattened_vertices) < 9:
                 return Response(
                     {'error': 'At least 3 vertices required'}, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            # Create polyline
             polyline = CurveOperations.polyline_from_vertices(flattened_vertices)
             
             if operation == 'analyze':
-                # Basic analysis
                 analysis = {
                     'area': polyline.get_area(),
                     'perimeter': polyline.length,
@@ -299,7 +371,6 @@ class GeometryAnalysisView(APIView):
                 return Response(analysis, status=status.HTTP_200_OK)
             
             elif operation == 'offset':
-                # Offset polygon
                 offset_distance = request.data.get('offset_distance', 5.0)
                 offset_polyline = OffsetOperations.offset_polygon(polyline, offset_distance)
                 
@@ -312,7 +383,6 @@ class GeometryAnalysisView(APIView):
                     return Response({'error': 'Offset operation failed'}, status=status.HTTP_400_BAD_REQUEST)
             
             elif operation == 'validate':
-                # Polygon validation
                 from .geometry.advanced import IntersectionOperations
                 self_intersects = IntersectionOperations.polyline_self_intersection_check(polyline)
                 

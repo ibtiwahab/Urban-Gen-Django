@@ -1,4 +1,4 @@
-# planning_api/geometry/advanced.py
+# planning_api/geometry/advanced.py - Complete implementation with all classes
 import math
 import random
 from typing import List, Tuple, Optional, Dict, Any
@@ -457,7 +457,7 @@ class SurfaceOperations:
 
 
 class ParametricDesign:
-    """Parametric design operations"""
+    """Enhanced parametric design operations with better building generation"""
     
     @staticmethod
     def apply_site_parameters(
@@ -467,95 +467,368 @@ class ParametricDesign:
         far: float = 1.0,
         mix_ratio: float = 0.0,
         building_style: int = 0,
-        orientation: float = 0.0
+        orientation: float = 0.0,
+        max_buildings: int = 50  # Added max_buildings parameter
     ) -> Dict[str, Any]:
-        """Apply parametric design rules to generate building layout"""
+        """Apply parametric design rules to generate building layout - IMPROVED VERSION"""
         
-        # Calculate derived parameters
-        base_building_size = 20.0
-        building_width = base_building_size * (0.7 + density * 0.6)  # 14-26m based on density
-        building_depth = base_building_size * (0.6 + density * 0.5)  # 12-22m based on density
+        import logging
+        logger = logging.getLogger(__name__)
         
-        # Number of buildings based on area and density
-        building_footprint = building_width * building_depth
-        max_buildings_by_area = int(site_area / (building_footprint * 2))  # Factor of 2 for spacing
-        num_buildings = max(1, int(max_buildings_by_area * density))
-        num_buildings = min(num_buildings, 8)  # Reasonable maximum
+        logger.info(f"Applying site parameters: density={density}, far={far}, building_style={building_style}, max_buildings={max_buildings}")
         
-        # Floor count based on FAR
-        total_floor_area_needed = site_area * far
-        floor_area_per_building = building_width * building_depth
-        total_floors_needed = total_floor_area_needed / floor_area_per_building if floor_area_per_building > 0 else 3
-        floors_per_building = max(2, int(total_floors_needed / num_buildings)) if num_buildings > 0 else 3
-        floors_per_building = min(floors_per_building, 15)  # Reasonable maximum
+        # Enhanced building size calculation based on parameters
+        building_width, building_depth = ParametricDesign._calculate_building_dimensions(
+            density, building_style, site_area
+        )
         
-        # Floor height based on building style
-        floor_heights = {
-            0: 3.0,   # Residential
-            1: 3.5,   # Office
-            2: 4.0,   # Commercial
-            3: 3.2    # Mixed
-        }
-        base_floor_height = floor_heights.get(building_style, 3.0)
+        # Enhanced number of buildings calculation
+        num_buildings = ParametricDesign._calculate_num_buildings(
+            site_area, density, building_width, building_depth, max_buildings
+        )
         
-        # Building placement strategy based on density
-        if density < 0.3:
-            # Low density - scattered placement
-            building_positions = BuildingPlacement.generate_building_positions(
-                site_polygon, num_buildings, building_width, building_depth, min_spacing=15.0
-            )
-        elif density < 0.7:
-            # Medium density - grid with some randomness
-            grid_positions = BuildingPlacement.generate_grid_positions(
-                site_polygon, building_width, building_depth, spacing=8.0
-            )
-            # Add some randomness
-            building_positions = []
-            for pos in grid_positions[:num_buildings]:
-                offset_x = random.uniform(-3, 3)
-                offset_y = random.uniform(-3, 3)
-                new_pos = Point3D(pos.x + offset_x, pos.y + offset_y, pos.z)
-                if GeometryUtils.point_in_polygon_2d(new_pos, site_polygon):
-                    building_positions.append(new_pos)
-                else:
-                    building_positions.append(pos)
-        else:
-            # High density - tight grid
-            building_positions = BuildingPlacement.generate_grid_positions(
-                site_polygon, building_width, building_depth, spacing=5.0
-            )[:num_buildings]
+        # Enhanced floor calculation based on FAR
+        floors_per_building, floor_height = ParametricDesign._calculate_floors(
+            site_area, far, num_buildings, building_width, building_depth, building_style
+        )
         
-        # Apply orientation rotation if needed
-        if abs(orientation) > 1e-6:
-            # Rotate building positions around site centroid
-            site_polyline = Polyline(site_polygon)
-            centroid = site_polyline.get_centroid()
-            
-            cos_angle = math.cos(orientation)
-            sin_angle = math.sin(orientation)
-            
-            rotated_positions = []
-            for pos in building_positions:
-                # Translate to origin
-                x = pos.x - centroid.x
-                y = pos.y - centroid.y
-                
-                # Rotate
-                new_x = x * cos_angle - y * sin_angle
-                new_y = x * sin_angle + y * cos_angle
-                
-                # Translate back
-                rotated_pos = Point3D(new_x + centroid.x, new_y + centroid.y, pos.z)
-                rotated_positions.append(rotated_pos)
-            
-            building_positions = rotated_positions
+        logger.info(f"Calculated: {num_buildings} buildings, {building_width:.1f}x{building_depth:.1f}m, {floors_per_building} floors")
+        
+        # Enhanced building placement strategy
+        building_positions = ParametricDesign._generate_building_positions(
+            site_polygon, num_buildings, building_width, building_depth, 
+            density, orientation, max_buildings
+        )
+        
+        logger.info(f"Generated {len(building_positions)} building positions")
         
         return {
             'building_positions': building_positions,
             'building_width': building_width,
             'building_depth': building_depth,
             'floors_per_building': floors_per_building,
-            'floor_height': base_floor_height,
+            'floor_height': floor_height,
             'num_buildings': len(building_positions),
-            'total_floor_area': len(building_positions) * floors_per_building * floor_area_per_building
+            'total_floor_area': len(building_positions) * floors_per_building * (building_width * building_depth)
         }
+    
+    @staticmethod
+    def _calculate_building_dimensions(density: float, building_style: int, site_area: float) -> Tuple[float, float]:
+        """Calculate building dimensions based on parameters"""
+        
+        # Base dimensions by building style
+        base_dimensions = {
+            0: (15.0, 12.0),   # Residential
+            1: (18.0, 14.0),   # Office
+            2: (22.0, 16.0),   # Commercial
+            3: (16.0, 13.0)    # Mixed
+        }
+        
+        base_width, base_depth = base_dimensions.get(building_style, (15.0, 12.0))
+        
+        # Scale by density (higher density = larger buildings to accommodate more people)
+        density_scale = 0.8 + (density * 0.6)  # Range: 0.8 to 1.4
+        
+        # Scale by site area (larger sites can accommodate larger buildings)
+        area_scale = 1.0
+        if site_area > 10000:  # Large site
+            area_scale = 1.2
+        elif site_area > 5000:  # Medium site
+            area_scale = 1.1
+        elif site_area < 1000:  # Small site
+            area_scale = 0.9
+        
+        final_width = base_width * density_scale * area_scale
+        final_depth = base_depth * density_scale * area_scale
+        
+        # Ensure reasonable limits
+        final_width = max(10.0, min(40.0, final_width))
+        final_depth = max(8.0, min(30.0, final_depth))
+        
+        return final_width, final_depth
+    
+    @staticmethod
+    def _calculate_num_buildings(
+        site_area: float, density: float, building_width: float, 
+        building_depth: float, max_buildings: int
+    ) -> int:
+        """Calculate number of buildings based on site parameters"""
+        
+        # Building footprint
+        building_footprint = building_width * building_depth
+        
+        # Minimum spacing between buildings (varies with density)
+        if density > 0.8:
+            min_spacing = 3.0
+        elif density > 0.6:
+            min_spacing = 5.0
+        elif density > 0.4:
+            min_spacing = 8.0
+        else:
+            min_spacing = 12.0
+        
+        # Total space needed per building (including spacing)
+        spacing_area = min_spacing * min_spacing
+        total_space_per_building = building_footprint + spacing_area
+        
+        # Theoretical maximum based on area
+        theoretical_max = int(site_area / total_space_per_building)
+        
+        # Apply density factor
+        density_adjusted = int(theoretical_max * density)
+        
+        # Ensure minimum and maximum bounds
+        num_buildings = max(1, min(density_adjusted, max_buildings))
+        
+        # Additional constraint: ensure buildings fit physically
+        if num_buildings > theoretical_max:
+            num_buildings = theoretical_max
+        
+        return num_buildings
+    
+    @staticmethod
+    def _calculate_floors(
+        site_area: float, far: float, num_buildings: int, 
+        building_width: float, building_depth: float, building_style: int
+    ) -> Tuple[int, float]:
+        """Calculate number of floors and floor height"""
+        
+        # Floor heights by building style
+        floor_heights = {
+            0: 3.0,   # Residential
+            1: 3.5,   # Office
+            2: 4.0,   # Commercial
+            3: 3.2    # Mixed
+        }
+        
+        floor_height = floor_heights.get(building_style, 3.0)
+        
+        # Calculate total required floor area from FAR
+        total_floor_area_needed = site_area * far
+        
+        # Floor area per building
+        floor_area_per_building = building_width * building_depth
+        
+        # Total floor area for all buildings
+        total_building_floor_area = num_buildings * floor_area_per_building
+        
+        # Calculate floors needed
+        if total_building_floor_area > 0:
+            floors_per_building = max(1, int(total_floor_area_needed / total_building_floor_area))
+        else:
+            floors_per_building = 1
+        
+        # Reasonable limits for floors
+        floors_per_building = max(1, min(20, floors_per_building))
+        
+        return floors_per_building, floor_height
+    
+    @staticmethod
+    def _generate_building_positions(
+        site_polygon: List[Point3D], num_buildings: int, building_width: float, 
+        building_depth: float, density: float, orientation: float, max_buildings: int
+    ) -> List[Point3D]:
+        """Generate building positions using improved placement strategies"""
+        
+        if len(site_polygon) < 3:
+            return []
+        
+        # Choose placement strategy based on density and number of buildings
+        if density < 0.3 or num_buildings <= 5:
+            # Low density: scattered placement
+            return ParametricDesign._generate_scattered_positions(
+                site_polygon, num_buildings, building_width, building_depth
+            )
+        elif density > 0.7 or num_buildings > 15:
+            # High density: grid-based placement
+            return ParametricDesign._generate_grid_positions(
+                site_polygon, num_buildings, building_width, building_depth, orientation
+            )
+        else:
+            # Medium density: organic placement
+            return ParametricDesign._generate_organic_positions(
+                site_polygon, num_buildings, building_width, building_depth, orientation
+            )
+    
+    @staticmethod
+    def _generate_scattered_positions(
+        site_polygon: List[Point3D], num_buildings: int, 
+        building_width: float, building_depth: float
+    ) -> List[Point3D]:
+        """Generate scattered building positions"""
+        
+        # Calculate bounding box
+        min_x = min(p.x for p in site_polygon)
+        max_x = max(p.x for p in site_polygon)
+        min_y = min(p.y for p in site_polygon)
+        max_y = max(p.y for p in site_polygon)
+        
+        positions = []
+        attempts = 0
+        max_attempts = num_buildings * 50  # More attempts for better placement
+        min_distance = max(building_width, building_depth) + 8.0  # Larger spacing for scattered
+        
+        while len(positions) < num_buildings and attempts < max_attempts:
+            attempts += 1
+            
+            # Generate random position within bounds
+            margin_x = building_width / 2
+            margin_y = building_depth / 2
+            
+            x = random.uniform(min_x + margin_x, max_x - margin_x)
+            y = random.uniform(min_y + margin_y, max_y - margin_y)
+            
+            candidate = Point3D(x, y, 0)
+            
+            # Check if building corners are inside polygon
+            if ParametricDesign._is_building_inside_polygon(
+                candidate, building_width, building_depth, site_polygon
+            ):
+                # Check minimum distance from existing buildings
+                if ParametricDesign._check_minimum_distance(candidate, positions, min_distance):
+                    positions.append(candidate)
+        
+        return positions
+    
+    @staticmethod
+    def _generate_grid_positions(
+        site_polygon: List[Point3D], num_buildings: int, 
+        building_width: float, building_depth: float, orientation: float
+    ) -> List[Point3D]:
+        """Generate grid-based building positions"""
+        
+        # Calculate bounding box
+        min_x = min(p.x for p in site_polygon)
+        max_x = max(p.x for p in site_polygon)
+        min_y = min(p.y for p in site_polygon)
+        max_y = max(p.y for p in site_polygon)
+        
+        # Calculate grid spacing
+        spacing_x = building_width + 4.0  # Tighter spacing for grid
+        spacing_y = building_depth + 4.0
+        
+        # Calculate grid dimensions
+        grid_width = max_x - min_x
+        grid_height = max_y - min_y
+        
+        cols = max(1, int(grid_width / spacing_x))
+        rows = max(1, int(grid_height / spacing_y))
+        
+        positions = []
+        
+        # Generate grid positions
+        for row in range(rows):
+            for col in range(cols):
+                if len(positions) >= num_buildings:
+                    break
+                
+                x = min_x + (col + 0.5) * spacing_x
+                y = min_y + (row + 0.5) * spacing_y
+                
+                candidate = Point3D(x, y, 0)
+                
+                # Apply orientation rotation
+                if abs(orientation) > 0.01:
+                    candidate = ParametricDesign._rotate_point_around_center(
+                        candidate, site_polygon, orientation
+                    )
+                
+                # Check if building is inside polygon
+                if ParametricDesign._is_building_inside_polygon(
+                    candidate, building_width, building_depth, site_polygon
+                ):
+                    positions.append(candidate)
+            
+            if len(positions) >= num_buildings:
+                break
+        
+        return positions[:num_buildings]
+    
+    @staticmethod
+    def _generate_organic_positions(
+        site_polygon: List[Point3D], num_buildings: int, 
+        building_width: float, building_depth: float, orientation: float
+    ) -> List[Point3D]:
+        """Generate organic building positions with some regularity"""
+        
+        # Start with a loose grid
+        grid_positions = ParametricDesign._generate_grid_positions(
+            site_polygon, num_buildings * 2, building_width, building_depth, orientation
+        )
+        
+        # Add randomization to grid positions
+        positions = []
+        variation = min(building_width, building_depth) * 0.3  # 30% variation
+        min_distance = max(building_width, building_depth) + 5.0
+        
+        for pos in grid_positions:
+            if len(positions) >= num_buildings:
+                break
+            
+            # Add random offset
+            offset_x = random.uniform(-variation, variation)
+            offset_y = random.uniform(-variation, variation)
+            
+            new_pos = Point3D(pos.x + offset_x, pos.y + offset_y, pos.z)
+            
+            # Check if still inside polygon and maintains minimum distance
+            if (ParametricDesign._is_building_inside_polygon(
+                new_pos, building_width, building_depth, site_polygon
+            ) and ParametricDesign._check_minimum_distance(new_pos, positions, min_distance)):
+                positions.append(new_pos)
+        
+        return positions
+    
+    @staticmethod
+    def _is_building_inside_polygon(
+        center: Point3D, width: float, depth: float, polygon: List[Point3D]
+    ) -> bool:
+        """Check if all corners of a building are inside the polygon"""
+        
+        half_width = width / 2
+        half_depth = depth / 2
+        
+        corners = [
+            Point3D(center.x - half_width, center.y - half_depth, center.z),
+            Point3D(center.x + half_width, center.y - half_depth, center.z),
+            Point3D(center.x + half_width, center.y + half_depth, center.z),
+            Point3D(center.x - half_width, center.y + half_depth, center.z)
+        ]
+        
+        return all(GeometryUtils.point_in_polygon_2d(corner, polygon) for corner in corners)
+    
+    @staticmethod
+    def _check_minimum_distance(
+        candidate: Point3D, existing_positions: List[Point3D], min_distance: float
+    ) -> bool:
+        """Check if candidate maintains minimum distance from existing positions"""
+        
+        for existing in existing_positions:
+            distance = candidate.distance_to(existing)
+            if distance < min_distance:
+                return False
+        return True
+    
+    @staticmethod
+    def _rotate_point_around_center(
+        point: Point3D, polygon: List[Point3D], angle: float
+    ) -> Point3D:
+        """Rotate a point around the polygon centroid"""
+        
+        # Calculate polygon centroid
+        centroid_x = sum(p.x for p in polygon) / len(polygon)
+        centroid_y = sum(p.y for p in polygon) / len(polygon)
+        
+        # Translate to origin
+        x = point.x - centroid_x
+        y = point.y - centroid_y
+        
+        # Rotate
+        cos_angle = math.cos(angle)
+        sin_angle = math.sin(angle)
+        
+        new_x = x * cos_angle - y * sin_angle
+        new_y = x * sin_angle + y * cos_angle
+        
+        # Translate back
+        return Point3D(new_x + centroid_x, new_y + centroid_y, point.z)
